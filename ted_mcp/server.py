@@ -208,9 +208,13 @@ async def search_notices_raw(
         page_size: Results per page (1-100). Use 50 for subagent calls.
         pagination_mode: "PAGE_NUMBER" (default) or "ITERATION" (for >15000 results)
         iteration_token: Token from previous ITERATION response for next page
-        place_of_performance: List of NUTS codes filtering by place of performance.
+        place_of_performance: List of NUTS codes or region names filtering by place of performance.
             Any NUTS level works (country, region, subdivision); TED matches hierarchically.
-            E.g. ["DE21"] (Oberbayern), ["FR10","ES30"], ["DE"] (all Germany).
+            Uses substring matching, so "München" finds both "München, Kreisfreie Stadt" and
+            "München, Landkreis". IMPORTANT: Labels are in the native language of the region
+            (e.g. "Bayern" not "Bavaria", "Île-de-France" not "Paris Region").
+            Use native-language names for best results.
+            E.g. ["DE21"] (Oberbayern), ["FR10","ES30"], ["DE"] (all Germany), ["München"].
     """
     page_size = max(1, min(100, page_size))
 
