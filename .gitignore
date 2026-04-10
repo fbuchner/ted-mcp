@@ -23,3 +23,13 @@ env/
 # IDE
 .vscode/
 .idea/
+
+
+
+*/node_modules/
+*/.wrangler/
+
+# Auto-generated files
+cloudflare/worker-configuration.d.ts
+cloudflare/src/nuts_data.ts
+NutsCodes.xlsx

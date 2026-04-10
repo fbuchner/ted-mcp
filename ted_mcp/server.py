@@ -1,43 +1,17 @@
 from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+import math
 import httpx
 from mcp.server.fastmcp import FastMCP, Context
 from .ted_client import TEDClient, TEDTimeoutError, TEDBadRequestError, TEDAPIError, AWARD_FIELDS
 from .models import NoticeSearchResult, zip_winners, pick_best_language, pick_all_languages, format_value
+from .nuts_codes import resolve_nuts_list
 
 
 @dataclass
 class AppContext:
     ted_client: TEDClient
-
-
-def build_expert_query(
-    winner_name: str | None = None,
-    buyer_country: str | None = None,
-    year: int | None = None,
-    cpv_codes: list[int] | None = None,
-    keywords: str | None = None,
-    notice_type: str | None = None,
-) -> str:
-    parts: list[str] = []
-    if winner_name:
-        effective_type = notice_type or "can-standard"
-        parts.append(f"notice-type={effective_type}")
-        parts.append(f'winner-name~"{winner_name}"')
-    elif notice_type:
-        parts.append(f"notice-type={notice_type}")
-    if buyer_country:
-        parts.append(f"buyer-country={buyer_country.upper()}")
-    if year:
-        parts.append(f"PD>={year}0101 AND PD<={year}1231")
-    if cpv_codes:
-        codes_str = ", ".join(str(c) for c in cpv_codes)
-        parts.append(f"classification-cpv IN ({codes_str})")
-    if keywords:
-        parts.append(f'FT~"{keywords}"')
-    return " AND ".join(parts) or "PD>=20200101"
 
 
 @asynccontextmanager
@@ -49,8 +23,20 @@ async def lifespan(server: FastMCP):
 mcp = FastMCP("TED EU Procurement", lifespan=lifespan)
 
 
-def _format_notices_markdown(results: list[NoticeSearchResult], total: int, query: str) -> str:
+def _format_notices_markdown(
+    results: list[NoticeSearchResult],
+    total: int,
+    query: str,
+    page: int = 1,
+    page_size: int = 10,
+) -> str:
+    total_pages = math.ceil(total / page_size) if page_size else 1
     lines = [f"**Found {total} notices** for query: `{query}`\n"]
+    if total_pages > 1:
+        showing_start = (page - 1) * page_size + 1
+        showing_end = min(page * page_size, total)
+        lines.append(f"**Page {page}/{total_pages}** (showing {showing_start}–{showing_end} of {total})\n")
+
     if not results:
         lines.append("No results returned.")
         return "\n".join(lines)
@@ -75,70 +61,16 @@ def _format_notices_markdown(results: list[NoticeSearchResult], total: int, quer
             lines.append(f"- **CPV:** {', '.join(r.cpv_codes[:5])}")
         lines.append("")
 
+    if page < total_pages:
+        remaining_pages = list(range(page + 1, total_pages + 1))
+        lines.append(
+            f"\n> **⚠ More results available ({total - min(page * page_size, total)} notices on {len(remaining_pages)} remaining page(s)).**\n"
+            "> Spawn one parallel subagent per page below, each calling `search_notices_raw` with the same query:\n>"
+        )
+        for p in remaining_pages:
+            lines.append(f'> - `search_notices_raw(expert_query="{query}", page={p}, page_size=50)`')
+
     return "\n".join(lines)
-
-
-@mcp.tool()
-async def search_notices(
-    ctx: Context,
-    winner_name: str | None = None,
-    buyer_country: str = "DEU",
-    year: int | None = None,
-    cpv_codes: list[int] | None = None,
-    keywords: str | None = None,
-    notice_type: str | None = None,
-    page: int = 1,
-    page_size: int = 10,
-) -> str:
-    """Search EU public procurement notices on TED (ted.europa.eu).
-
-    Use this to find contract award notices, filter by winner company name,
-    buyer country, year, CPV codes, or keywords.
-
-    Args:
-        winner_name: Company/entity name to search as winner (fuzzy match). E.g. "Deloitte", "Accenture"
-        buyer_country: 3-letter ISO country code of the buying authority. Defaults to "DEU" (Germany). E.g. "FRA", "GBR", "ITA"
-        year: Publication year filter. E.g. 2024
-        cpv_codes: List of CPV (Common Procurement Vocabulary) codes. E.g. [72000000] for IT services
-        keywords: Full-text search across notice content. E.g. "SAP S4 transformation"
-        notice_type: Notice type filter. Defaults to "can-standard" when winner_name is set. E.g. "can-standard", "cn-standard"
-        page: Page number (1-based)
-        page_size: Results per page (1-100, default 10)
-    """
-    page_size = max(1, min(100, page_size))
-    query = build_expert_query(
-        winner_name=winner_name,
-        buyer_country=buyer_country,
-        year=year,
-        cpv_codes=cpv_codes,
-        keywords=keywords,
-        notice_type=notice_type,
-    )
-
-    ted: TEDClient = ctx.request_context.lifespan_context.ted_client
-    try:
-        data = await ted.search(query, page=page, limit=page_size)
-    except TEDTimeoutError:
-        return "Error: TED API timed out. Try narrowing your query (add a year, country, or more specific terms)."
-    except TEDBadRequestError as e:
-        return f"Error: {e}\n\nTip: Check that buyer_country uses 3-letter ISO code (e.g. DEU not DE) and year is a 4-digit integer."
-    except TEDAPIError as e:
-        return f"Error: {e}"
-
-    notices_raw = data.get("notices", [])
-    total = data.get("totalNoticeCount", 0)
-    timed_out = data.get("timedOut", False)
-
-    results = [NoticeSearchResult.from_notice(n) for n in notices_raw]
-    output = _format_notices_markdown(results, total, query)
-
-    if timed_out:
-        output += "\n\n> **Warning:** TED API query timed out — results may be incomplete. Try narrowing your query."
-
-    if total == 0:
-        output += "\n\n**Tips:**\n- Use 3-letter ISO country codes (DEU, FRA, GBR, ITA, ESP, POL, NLD)\n- Try partial company names\n- Winner data is most reliable for `can-standard` notices from 2021 onwards"
-
-    return output
 
 
 @mcp.tool()
@@ -233,26 +165,71 @@ async def search_notices_raw(
     page_size: int = 10,
     pagination_mode: str = "PAGE_NUMBER",
     iteration_token: str | None = None,
+    place_of_performance: list[str] | None = None,
 ) -> str:
-    """Search TED notices using a raw expert query string.
+    """Search EU public procurement notices on TED (ted.europa.eu) via expert query.
 
-    For power users who need precise control over the TED expert query syntax.
-    Supports ITERATION pagination mode for large result sets.
+    Build a TED expert query string and pass it as `expert_query`. Combine clauses
+    with AND / OR / NOT and parentheses. Supports ITERATION pagination for large
+    result sets (>15 000 notices).
 
-    Expert query examples:
-    - `buyer-country=DEU AND winner-name~"Deloitte" AND PD>=20240101 AND PD<=20241231`
+    When the response contains a pagination warning, spawn one parallel subagent per
+    remaining page using the exact tool calls shown in the warning. Do not fetch
+    remaining pages sequentially — always parallelise.
+
+    Common fields:
+    - `buyer-country=DEU` — 3-letter ISO country code of the buying authority
+      (DEU, FRA, GBR, ITA, ESP, POL, NLD, …).
+    - `winner-name~"Deloitte"` — fuzzy match on winner; pair with
+      `notice-type=can-standard` (winner data is reliable only for contract-award
+      notices, mostly from 2021 onwards).
+    - `notice-type=can-standard` — contract award; `cn-standard` is the call for
+      tenders.
+    - `PD>=20240101 AND PD<=20241231` — publication-date range (year filter).
+    - `classification-cpv IN (72000000, 73000000)` — CPV codes (IT, R&D, …).
+    - `FT~"SAP S4 transformation"` — full-text search.
+    - `place-of-performance IN ("DE21")` — NUTS code; usually easier to set via
+      the `place_of_performance` argument which accepts region names too.
+
+    Example queries:
+    - `notice-type=can-standard AND winner-name~"Deloitte" AND buyer-country=DEU AND PD>=20240101 AND PD<=20241231`
     - `notice-type=can-standard AND classification-cpv IN (72000000) AND buyer-country=FRA`
     - `FT~"SAP S4 transformation" AND notice-type=can-standard`
+
+    Tips when you get zero results:
+    - Use 3-letter ISO country codes (DEU not DE).
+    - Try partial / shorter company names.
+    - Winner data is most reliable for `can-standard` notices from 2021 onwards.
 
     Args:
         expert_query: TED expert query string
         fields: List of fields to return. Defaults to standard award fields.
         page: Page number for PAGE_NUMBER mode
-        page_size: Results per page (1-100)
+        page_size: Results per page (1-100). Use 50 for subagent calls.
         pagination_mode: "PAGE_NUMBER" (default) or "ITERATION" (for >15000 results)
         iteration_token: Token from previous ITERATION response for next page
+        place_of_performance: List of NUTS codes or region names filtering by place of performance.
+            Any NUTS level works (country, region, subdivision); TED matches hierarchically.
+            Uses substring matching, so "München" finds both "München, Kreisfreie Stadt" and
+            "München, Landkreis". IMPORTANT: Labels are in the native language of the region
+            (e.g. "Bayern" not "Bavaria", "Île-de-France" not "Paris Region").
+            Use native-language names for best results.
+            E.g. ["DE21"] (Oberbayern), ["FR10","ES30"], ["DE"] (all Germany), ["München"].
     """
     page_size = max(1, min(100, page_size))
+
+    nuts_warning = ""
+    if place_of_performance:
+        resolved, unresolved = resolve_nuts_list(place_of_performance)
+        if resolved:
+            quoted = ", ".join(f'"{c}"' for c in resolved)
+            nuts_clause = f"place-of-performance IN ({quoted})"
+            expert_query = f"({expert_query}) AND {nuts_clause}" if expert_query.strip() else nuts_clause
+        if unresolved:
+            nuts_warning = (
+                f"\n\n> **Note:** Could not resolve NUTS codes for: {', '.join(unresolved)}. "
+                "Pass an explicit NUTS code (e.g. `DE21`) or a recognised region name."
+            )
     ted: TEDClient = ctx.request_context.lifespan_context.ted_client
 
     try:
@@ -277,13 +254,16 @@ async def search_notices_raw(
     next_token = data.get("iterationNextToken")
 
     results = [NoticeSearchResult.from_notice(n) for n in notices_raw]
-    output = _format_notices_markdown(results, total, expert_query)
+    output = _format_notices_markdown(results, total, expert_query, page=page, page_size=page_size)
 
     if next_token:
         output += f"\n\n**Next page token (ITERATION):** `{next_token}`\n(Pass as `iteration_token` in next call)"
 
     if timed_out:
         output += "\n\n> **Warning:** TED API query timed out — results may be incomplete."
+
+    if nuts_warning:
+        output += nuts_warning
 
     return output
 

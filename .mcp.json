@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "ted-procurement": {
-      "command": "ted-mcp"
+      "command": "uv",
+      "args": ["run", "ted-mcp"]
     }
   }
 }

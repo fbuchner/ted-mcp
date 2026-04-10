@@ -36,44 +36,18 @@ Use the full path to `uv` (find it with `which uv`) rather than just `"uv"`, sin
 
 ## Tools
 
-### `search_notices`
-
-Structured search over contract award notices.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `winner_name` | string | Company name, fuzzy match (e.g. `"Deloitte"`) |
-| `buyer_country` | string | 3-letter ISO country code. Defaults to `"DEU"` (Germany) |
-| `year` | int | Publication year (e.g. `2024`) |
-| `cpv_codes` | int[] | CPV codes (e.g. `[72000000]`) |
-| `keywords` | string | Full-text search across notice content |
-| `notice_type` | string | Defaults to `can-standard` when `winner_name` is set |
-| `page` / `page_size` | int | Pagination; max 100 per page |
-
-**Example natural-language queries:**
-- "Which contracts did Deloitte win in Germany in 2024?"
-- "Which government bodies procured SAP S4 transformations?"
-- "What are prominent IT services contracts in France in 2023"
-
-You can query in your local language as well (e.g. in German "Welche Ausschreibungen für Softwareentwicklung laufen gerade?").
-
-### `get_notice`
-
-Returns full detail for a single notice by publication number.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `publication_number` | string | Format `NNNNNN-YYYY` (e.g. `"6091-2024"`) |
-
 ### `search_notices_raw`
 
-Passes an expert query string directly to the TED API. Intended for precise or complex queries.
+Search TED notices using a TED expert query string. The model assembles the
+query from natural-language requests.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `expert_query` | string | TED expert query string |
+| `expert_query` | string | TED expert query string (see syntax below) |
+| `place_of_performance` | string[] | NUTS codes or region names (e.g. `["Bayern"]`, `["DE21","FR10"]`). Resolved via a bundled NUTS lookup with fuzzy matching, then ANDed onto `expert_query` as a `place-of-performance IN (...)` clause |
 | `fields` | string[] | Fields to return (defaults to standard award fields) |
-| `pagination_mode` | string | `PAGE_NUMBER` (default) or `ITERATION` |
+| `page` / `page_size` | int | Pagination; max 100 per page |
+| `pagination_mode` | string | `PAGE_NUMBER` (default) or `ITERATION` (>15 000 results) |
 | `iteration_token` | string | Continuation token for ITERATION mode |
 
 **Expert query syntax:**
@@ -85,7 +59,24 @@ PD>=20240101 AND PD<=20241231
 classification-cpv IN (72000000)
 FT~"SAP S4 transformation"
 notice-type=can-standard
+place-of-performance IN ("DE21")
 ```
+
+**Example natural-language queries:**
+- "Which contracts did Deloitte win in Germany in 2024?"
+- "Which government bodies procured SAP S4 transformations?"
+- "What are prominent IT services contracts in France in 2023?"
+- "Show me public IT contracts performed in Bavaria last year."
+
+You can query in your local language as well (e.g. in German "Welche Ausschreibungen für Softwareentwicklung laufen gerade?").
+
+### `get_notice`
+
+Returns full detail for a single notice by publication number.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `publication_number` | string | Format `NNNNNN-YYYY` (e.g. `"6091-2024"`) |
 
 ## Reference
 

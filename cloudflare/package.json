@@ -3,17 +3,18 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "generate-nuts": "node scripts/generate-nuts-data.mjs",
+    "dev": "npm run generate-nuts && wrangler dev",
+    "deploy": "npm run generate-nuts && wrangler deploy",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "agents": "^0.0.84",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "agents": "^0.0.84",
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250523.0",
+    "@types/node": "^25.5.2",
     "typescript": "^5.5.2",
     "wrangler": "^4.0.0"
   }

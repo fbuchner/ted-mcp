@@ -1,6 +1,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { resolveNutsList } from "./nuts_codes.js";
 
 // ============ TED Client ============
 
@@ -231,39 +232,6 @@ function noticeFromRaw(notice: Record<string, unknown>, maxWinners = 10): Notice
   };
 }
 
-// ============ Query Builder ============
-
-function buildExpertQuery(params: {
-  winner_name?: string;
-  buyer_country?: string;
-  year?: number;
-  cpv_codes?: number[];
-  keywords?: string;
-  notice_type?: string;
-}): string {
-  const parts: string[] = [];
-  if (params.winner_name) {
-    const effectiveType = params.notice_type ?? "can-standard";
-    parts.push(`notice-type=${effectiveType}`);
-    parts.push(`winner-name~"${params.winner_name}"`);
-  } else if (params.notice_type) {
-    parts.push(`notice-type=${params.notice_type}`);
-  }
-  if (params.buyer_country) {
-    parts.push(`buyer-country=${params.buyer_country.toUpperCase()}`);
-  }
-  if (params.year) {
-    parts.push(`PD>=${params.year}0101 AND PD<=${params.year}1231`);
-  }
-  if (params.cpv_codes && params.cpv_codes.length > 0) {
-    parts.push(`classification-cpv IN (${params.cpv_codes.join(", ")})`);
-  }
-  if (params.keywords) {
-    parts.push(`FT~"${params.keywords}"`);
-  }
-  return parts.join(" AND ") || "PD>=20200101";
-}
-
 // ============ Markdown Formatter ============
 
 function formatNoticesMarkdown(results: NoticeSearchResult[], total: number, query: string): string {
@@ -306,54 +274,6 @@ export class TedMCP extends McpAgent<Env> {
   });
 
   async init() {
-    this.server.tool(
-      "search_notices",
-      "Search EU public procurement notices on TED (ted.europa.eu). Use this to find contract award notices, filter by winner company name, buyer country, year, CPV codes, or keywords.",
-      {
-        winner_name: z.string().optional().describe('Company/entity name to search as winner (fuzzy match). E.g. "Deloitte", "Accenture"'),
-        buyer_country: z.string().default("DEU").describe('3-letter ISO country code of the buying authority. E.g. "FRA", "GBR", "ITA"'),
-        year: z.number().int().optional().describe("Publication year filter. E.g. 2024"),
-        cpv_codes: z.array(z.number().int()).optional().describe("List of CPV (Common Procurement Vocabulary) codes. E.g. [72000000] for IT services"),
-        keywords: z.string().optional().describe('Full-text search across notice content. E.g. "SAP S4 transformation"'),
-        notice_type: z.string().optional().describe('Notice type filter. Defaults to "can-standard" when winner_name is set.'),
-        page: z.number().int().default(1).describe("Page number (1-based)"),
-        page_size: z.number().int().default(10).describe("Results per page (1-100)"),
-      },
-      async ({ winner_name, buyer_country, year, cpv_codes, keywords, notice_type, page, page_size }) => {
-        const limitedPageSize = Math.max(1, Math.min(100, page_size));
-        const query = buildExpertQuery({ winner_name, buyer_country, year, cpv_codes, keywords, notice_type });
-
-        let data: Record<string, unknown>;
-        try {
-          data = await tedSearch(query, undefined, page, limitedPageSize);
-        } catch (e) {
-          if (e instanceof TEDTimeoutError) {
-            return { content: [{ type: "text" as const, text: "Error: TED API timed out. Try narrowing your query (add a year, country, or more specific terms)." }] };
-          }
-          if (e instanceof TEDBadRequestError) {
-            return { content: [{ type: "text" as const, text: `Error: ${(e as Error).message}\n\nTip: Check that buyer_country uses 3-letter ISO code (e.g. DEU not DE) and year is a 4-digit integer.` }] };
-          }
-          return { content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }] };
-        }
-
-        const noticesRaw = (data["notices"] as unknown[] | undefined) ?? [];
-        const total = (data["totalNoticeCount"] as number | undefined) ?? 0;
-        const timedOut = Boolean(data["timedOut"]);
-
-        const results = noticesRaw.map((n) => noticeFromRaw(n as Record<string, unknown>));
-        let output = formatNoticesMarkdown(results, total, query);
-
-        if (timedOut) {
-          output += "\n\n> **Warning:** TED API query timed out — results may be incomplete. Try narrowing your query.";
-        }
-        if (total === 0) {
-          output += "\n\n**Tips:**\n- Use 3-letter ISO country codes (DEU, FRA, GBR, ITA, ESP, POL, NLD)\n- Try partial company names\n- Winner data is most reliable for `can-standard` notices from 2021 onwards";
-        }
-
-        return { content: [{ type: "text" as const, text: output }] };
-      },
-    );
-
     this.server.tool(
       "get_notice",
       "Retrieve full details of a single TED procurement notice.",
@@ -427,21 +347,36 @@ export class TedMCP extends McpAgent<Env> {
 
     this.server.tool(
       "search_notices_raw",
-      'Search TED notices using a raw expert query string. For power users who need precise control over the TED expert query syntax. Supports ITERATION pagination mode for large result sets. Examples: `buyer-country=DEU AND winner-name~"Deloitte"`, `notice-type=can-standard AND classification-cpv IN (72000000)`',
+      'Search EU public procurement notices on TED via expert query. Combine clauses with AND/OR/NOT. Common fields: buyer-country=DEU, winner-name~"Deloitte", notice-type=can-standard, PD>=20240101 AND PD<=20241231, classification-cpv IN (72000000), FT~"keyword". For place-of-performance, prefer the place_of_performance argument (accepts NUTS codes or region names). Supports ITERATION pagination for >15 000 results. Tips: use 3-letter ISO country codes; winner data is most reliable for can-standard notices from 2021 onwards.',
       {
-        expert_query: z.string().describe('TED expert query string. E.g. `buyer-country=DEU AND winner-name~"Deloitte" AND PD>=20240101`'),
+        expert_query: z.string().describe('TED expert query string. E.g. `notice-type=can-standard AND winner-name~"Deloitte" AND buyer-country=DEU AND PD>=20240101 AND PD<=20241231`'),
+        place_of_performance: z.array(z.string()).optional().describe('NUTS codes or region names to filter by place of performance. Uses substring matching, then ANDed onto the expert query as `place-of-performance IN (...)`. IMPORTANT: Labels are in the native language of the region (e.g. "Bayern" not "Bavaria", "Île-de-France" not "Paris Region"). Use native-language names for best results. E.g. ["Bayern"], ["DE21","FR10"], ["München"].'),
         fields: z.array(z.string()).optional().describe("List of fields to return. Defaults to standard award fields."),
         page: z.number().int().default(1).describe("Page number for PAGE_NUMBER mode"),
         page_size: z.number().int().default(10).describe("Results per page (1-100)"),
         pagination_mode: z.enum(["PAGE_NUMBER", "ITERATION"]).default("PAGE_NUMBER").describe("Pagination mode"),
         iteration_token: z.string().optional().describe("Token from previous ITERATION response for next page"),
       },
-      async ({ expert_query, fields, page, page_size, pagination_mode, iteration_token }) => {
+      async ({ expert_query, place_of_performance, fields, page, page_size, pagination_mode, iteration_token }) => {
         const limitedPageSize = Math.max(1, Math.min(100, page_size));
+
+        let effectiveQuery = expert_query;
+        let nutsWarning = "";
+        if (place_of_performance && place_of_performance.length > 0) {
+          const { resolved, unresolved } = resolveNutsList(place_of_performance);
+          if (resolved.length > 0) {
+            const quoted = resolved.map((c) => `"${c}"`).join(", ");
+            const clause = `place-of-performance IN (${quoted})`;
+            effectiveQuery = effectiveQuery.trim() ? `(${effectiveQuery}) AND ${clause}` : clause;
+          }
+          if (unresolved.length > 0) {
+            nutsWarning = `\n\n> **Note:** Could not resolve NUTS codes for: ${unresolved.join(", ")}. Pass an explicit NUTS code (e.g. \`DE21\`) or a recognised region name.`;
+          }
+        }
 
         let data: Record<string, unknown>;
         try {
-          data = await tedSearch(expert_query, fields, page, limitedPageSize, pagination_mode, iteration_token);
+          data = await tedSearch(effectiveQuery, fields, page, limitedPageSize, pagination_mode, iteration_token);
         } catch (e) {
           if (e instanceof TEDTimeoutError) {
             return { content: [{ type: "text" as const, text: "Error: TED API timed out. Try narrowing your query." }] };
@@ -458,13 +393,16 @@ export class TedMCP extends McpAgent<Env> {
         const nextToken = data["iterationNextToken"] as string | undefined;
 
         const results = noticesRaw.map((n) => noticeFromRaw(n as Record<string, unknown>));
-        let output = formatNoticesMarkdown(results, total, expert_query);
+        let output = formatNoticesMarkdown(results, total, effectiveQuery);
 
         if (nextToken) {
           output += `\n\n**Next page token (ITERATION):** \`${nextToken}\`\n(Pass as \`iteration_token\` in next call)`;
         }
         if (timedOut) {
           output += "\n\n> **Warning:** TED API query timed out — results may be incomplete.";
+        }
+        if (nutsWarning) {
+          output += nutsWarning;
         }
 
         return { content: [{ type: "text" as const, text: output }] };
